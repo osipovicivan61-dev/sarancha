@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>KindAi Pro · SD 2</title>
+<style>
+  body{background:#0b1020;color:#dbe4ff;font-family:Segoe UI,system-ui,sans-serif;margin:0;padding:28px;line-height:1.5}
+  h1{font-size:22px;margin:0 0 4px}.sub{color:#6f7ea8;margin-bottom:18px}
+  .card{background:#121936;border:1px solid #22305e;border-radius:12px;padding:16px 18px;margin:12px 0}
+  label{display:block;color:#7aa2ff;font-size:13px;margin:10px 0 4px}
+  textarea,input,select{background:#0a1128;border:1px solid #22305e;border-radius:8px;color:#dbe4ff;padding:9px 11px;font-size:14px;width:100%;box-sizing:border-box}
+  textarea{min-height:72px;resize:vertical}
+  button{background:#1d4ed8;color:#fff;border:0;border-radius:10px;padding:11px 24px;font-size:15px;cursor:pointer}
+  button:disabled{background:#334155;cursor:default}
+  .row{display:flex;gap:12px}.row>div{flex:1}
+  video{width:100%;max-width:760px;border-radius:10px;margin-top:8px}
+  #done a{color:#4ade80}
+  .radios{display:flex;gap:16px;margin-top:6px}
+  .radios label{display:flex;align-items:center;gap:6px;margin:0;color:#dbe4ff;font-size:14px}
+  .models{display:flex;gap:10px;margin-top:6px}
+  .models label{flex:1;border:1px solid #22305e;border-radius:10px;padding:10px 12px;cursor:pointer;margin:0;color:#dbe4ff;font-size:14px}
+  .models label:has(input:checked){border-color:#1d4ed8;background:#10204a}
+  .models small{display:block;color:#6f7ea8;margin-top:2px}
+  input[type=radio]{width:auto}
+  #keyrow{display:flex;gap:8px}
+  #keyrow input{flex:1;font-family:Consolas,monospace;font-size:12px}
+</style>
+</head>
+<body>
+
+<h1>SD 2 — генерация видео</h1>
+<div class="sub">всё в этом окне</div>
+
+<div class="card">
+  <label>Модель</label>
+  <div class="models">
+    <label><input type="radio" name="model" value="fast" checked> SD 2 Fast
+      <small>быстрая генерация</small></label>
+    <label><input type="radio" name="model" value="sd2"> SD 2
+      <small>качественная генерация</small></label>
+  </div>
+
+  <label>API ключ</label>
+  <div id="keyrow">
+    <input id="key" type="password" placeholder="получаю ключ…">
+    <button id="getkey" type="button" style="padding:9px 14px;font-size:13px">Ключ</button>
+  </div>
+
+  <label>Промпт</label>
+  <textarea id="prompt">A cinematic drone shot of a snowy mountain at sunrise, warm light</textarea>
+
+  <label>Референсы — фото <span style="color:#6f7ea8">(до 8)</span></label>
+  <input type="file" id="imgs" accept="image/*" multiple>
+
+  <label>Референсы — видео <span style="color:#6f7ea8">(до 3)</span></label>
+  <input type="file" id="vids" accept="video/*" multiple>
+
+  <label>Референсы — аудио <span style="color:#6f7ea8">(до 3)</span></label>
+  <input type="file" id="auds" accept="audio/*" multiple>
+
+  <div class="row">
+    <div>
+      <label>Длительность (сек)</label>
+      <input id="dur" type="number" min="4" max="15" value="4">
+    </div>
+    <div>
+      <label>Ориентация</label>
+      <select id="ratio"><option>16:9</option><option>9:16</option><option>1:1</option></select>
+    </div>
+  </div>
+
+  <p style="margin:14px 0 4px">
+    <button id="go">Сгенерировать</button>
+  </p>
+  <div id="timer" style="display:none;color:#7aa2ff;font-size:13px;margin-top:6px"></div>
+  <div id="error" style="display:none;color:#f87171;font-size:13px;margin-top:6px"></div>
+</div>
+
+<div class="card" id="doneCard" style="display:none">
+  <b>Готовое видео</b>
+  <div id="done"></div>
+</div>
+
+<script>
+let cancelled=false;
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+async function getKey(){
+  const inp=document.getElementById("key");
+  const saved=localStorage.getItem("k_key");
+  if(saved){ inp.value=saved; return saved; }
+  try{
+    const r=await fetch("/api/keys",{method:"POST"});
+    const j=await r.json();
+    if(j.key){
+      inp.value=j.key;
+      localStorage.setItem("k_key", j.key);
+      return j.key;
+    }
+  }catch(e){}
+  return "";
+}
+document.getElementById("getkey").onclick=async()=>{
+  localStorage.removeItem("k_key");
+  document.getElementById("key").value="";
+  await getKey();
+};
+
+async function uploadRef(file){
+  const fd=new FormData();
+  fd.append("k","ae4f5b0c9d");
+  fd.append("files[]", file, file.name);
+  const r=await fetch("/api/upload", {method:"POST", body:fd});
+  if(!r.ok) throw new Error("upload "+file.name);
+  const j=await r.json();
+  const url=j.files && j.files[0] && j.files[0].url;
+  if(!url) throw new Error("upload "+file.name);
+  return url;
+}
+async function collectRefs(){
+  const out=[];
+  const groups=[
+    ["imgs","image","reference_image",8],
+    ["vids","video","reference_video",3],
+    ["auds","audio","reference_audio",3],
+  ];
+  for(const [id,type,role,max] of groups){
+    let n=0;
+    for(const f of document.getElementById(id).files){
+      if(n>=max) break;
+      out.push({url:await uploadRef(f), type, role});
+      n++;
+    }
+  }
+  return out;
+}
+
+document.getElementById("go").onclick = async ()=>{
+  const btn=document.getElementById("go");
+  btn.disabled=true; btn.textContent="Генерация…"; cancelled=false;
+  const errEl=document.getElementById("error"); errEl.style.display="none";
+  const timerEl=document.getElementById("timer");
+  timerEl.style.display="block"; timerEl.textContent="0 сек";
+  const t0=Date.now();
+  const tick=setInterval(()=>{ timerEl.textContent=Math.round((Date.now()-t0)/1000)+" сек"; },200);
+  document.getElementById("doneCard").style.display="none";
+  document.getElementById("done").innerHTML="";
+  try{
+    const key=document.getElementById("key").value.trim() || (await getKey());
+    if(!key) throw new Error("нет API ключа");
+
+    const prompt=document.getElementById("prompt").value.trim();
+    const duration=Math.max(4,Math.min(15,parseInt(document.getElementById("dur").value)||4));
+    const ratio=document.getElementById("ratio").value;
+    const model=document.querySelector('input[name=model]:checked').value;
+    const refs=await collectRefs();
+
+    const r=await fetch("/api/run",{
+      method:"POST",
+      headers:{"Content-Type":"application/json","X-Api-Key":key},
+      body:JSON.stringify({key, prompt, duration, ratio, model, refs})
+    });
+    const j=await r.json();
+    if(!r.ok || !j.job) throw new Error(j.error || ("HTTP "+r.status));
+
+    const deadline=Date.now()+20*60*1000;
+    let url=null;
+    while(Date.now()<deadline && !cancelled){
+      await sleep(4000);
+      const s=await fetch("/api/status?id="+j.job).then(x=>x.json());
+      if(s.state==="done"){ url=s.url; break; }
+      if(s.state==="error") throw new Error(s.message || "failed");
+    }
+    if(!url) throw new Error("timeout");
+
+    const wrap=document.getElementById("done");
+    const v=document.createElement("video"); v.controls=true; v.autoplay=true; v.src=url;
+    wrap.appendChild(v);
+    const a=document.createElement("p");
+    a.innerHTML=`<a href="${url}" target="_blank" download>скачать / открыть</a>`;
+    wrap.appendChild(a);
+    document.getElementById("doneCard").style.display="block";
+  }catch(e){
+    errEl.textContent="ошибка: "+e.message;
+    errEl.style.display="block";
+  }finally{
+    clearInterval(tick);
+    btn.textContent="Сгенерировать";
+    btn.disabled=false;
+  }
+};
+
+getKey();
+</script>
+</body>
+</html>
